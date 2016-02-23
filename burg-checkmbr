@@ -1,0 +1,211 @@
+#!/bin/bash
+# burg-checkmbr v0.1.0 last mod 2016/02/09
+# Latest version at <https://github.com/ryran/burg-checkmbr>
+# Copyright 2016 Ryan Sawhill Aroha <rsaw@redhat.com>
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+#    General Public License <gnu.org/licenses/gpl.html> for more details.
+#-------------------------------------------------------------------------------
+
+k='\033[0;30m'    # Black
+r='\033[0;31m'    # Red
+g='\033[0;32m'    # Green
+y='\033[0;33m'    # Yellow
+b='\033[0;34m'    # Blue
+p='\033[0;35m'    # Purple
+c='\033[0;36m'    # Cyan
+w='\033[0;37m'    # White
+K='\033[1;30m'    # Black
+R='\033[1;31m'    # Red
+G='\033[1;32m'    # Green
+Y='\033[1;33m'    # Yellow
+B='\033[1;34m'    # Blue
+P='\033[1;35m'    # Purple
+C='\033[1;36m'    # Cyan
+W='\033[1;37m'    # White
+D='\033[1;1m'     # Bold
+Z='\033[0;0m'     # Zero colors
+
+DEBUG() { printf "${b}Debug:  ${@}${Z}\n" >&2; }
+ERR()   { printf "${Y}Error:  ${@}${Z}\n"; }
+Err()   { printf "${y}${@}${Z}\n"; }
+INFO()  { printf "${C}${@}${Z}\n"; }
+Info()  { printf "${c}${@}${Z}\n"; }
+GOOD()  { printf "${G}✔ ${@}${Z}\n"; exitCode=0; }
+Good()  { printf "${g}${@}${Z}\n"; }
+BAD()   { printf "${R}✘ ${@}${Z}\n"; exitCode=9; }
+Bad()   { printf "${r}${@}${Z}\n"; }
+
+help="${D}Usage: burg-checkmbr [-q|--quiet] <DEVICE> [GRUB_IMG_DIR]${Z}
+Uses bytes 0x40 & 0x44-0x47 of DEVICE to determine health of GRUBv1 stages 1, 1.5, & 2
+
+Note that ${D}GRUB_IMG_DIR${Z} defaults to ${D}/boot/grub${Z} if omitted
+
+PROCESS:
+
+- Read 1 byte starting at 0x40 to determine whether using stage1.5 or not
+
+- If find '0xff', then stage1.5 in use
+
+  * Read 508 bytes starting at sector 1 (i.e., 2nd disk sector; after MBR)
+    Compare to appropriate stage1_5 img by detecting fs-type of GRUB_IMG_DIR
+
+- If not using stage1.5
+
+  * Read 4 bytes starting at 0x44 (STAGE1_STAGE2_SECTOR)
+    Seek to sector specified by STAGE1_STAGE2_SECTOR, read first 512 bytes
+    Compare with first 512 bytes of <GRUB_IMG_DIR>/stage2
+
+Example usage:
+  burg-checkmbr /dev/sda
+  burg-checkmbr /tmp/sda.img /mnt/boot/grub
+"
+
+if [[ ${1} == -q || ${1} == --quiet ]]; then
+    quiet=1
+    shift
+    DEBUG() { :; }
+    INFO() { :; }
+    Info() { :; }
+    GOOD() { printf "GOOD\n"; exit 0; }
+    Good() { :; }
+    BAD() { printf "BAD\n"; exit 9; }
+    Bad() { :; }
+else
+    quiet=
+fi
+
+if [[ ${#} -eq 0 || ${#} -gt 2 || ${1} == -h || ${1} == --help ]]; then
+    printf "${help}"
+    exit
+elif ! command -v xxd >/dev/null; then
+    ERR "xxd command required"
+    exit 2
+elif ! command -v vimdiff >/dev/null; then
+    ERR "vimdiff command required"
+    exit 2
+elif [[ -b ${1} ]]; then
+    isDevice=1
+    DEBUG "Input '${1}' is a block device" >&2
+elif [[ -f ${1} ]]; then
+    isImageFile=1
+    DEBUG "Input '${1}' is file; not block device" >&2
+else
+    ERR "Invalid file '${1}'"
+    exit 1
+fi
+
+if [[ ${#} -eq 1 ]]; then
+    GRUB_IMG_DIR=/boot/grub
+else
+    if [[ -d ${2} ]]; then
+        GRUB_IMG_DIR=${2}
+    else
+        echo "Error: GRUB_IMG_DIR '${2}' is not a directory"
+        exit 1
+    fi
+fi
+
+
+BOOTFS_TYPE=$(df -T "${GRUB_IMG_DIR}" | awk '/^\/dev/ {print $2}')
+case ${BOOTFS_TYPE} in
+    ext*)  STAGE_1_5="e2fs_stage1_5" ;;
+    vfat)  STAGE_1_5="fat_stage1_5"  ;;
+    xfs)   STAGE_1_5="xfs_stage1_5"  ;;
+    *)     STAGE_1_5=
+esac
+
+BOOT_DRIVE_BYTE_hex=$(dd if=${1} bs=1 skip=$((0x40)) count=1 2>/dev/null | xxd | awk '{print $2}')
+BOOT_DRIVE_BYTE_decimal=$((0x$BOOT_DRIVE_BYTE_hex))
+DEBUG "${1} 0x40 says 'boot drive' byte is:"
+DEBUG "    0x${BOOT_DRIVE_BYTE_hex}"
+
+
+if [[ ${BOOT_DRIVE_BYTE_decimal} -eq 255 ]]; then
+
+    INFO "GRUB stage1.5 in use on this system (stage1 does not point directly to stage2)"
+    Info "On RHEL systems this means grub-install has been run at least once since"
+    Info "the original system installation"
+    
+    if [[ -z ${STAGE_1_5} ]]; then
+        ERR "${0##*/} is not coded to deal with the filesystem type of your GRUB_IMG_DIR (${GRUB_IMG_DIR})"
+        Err "That means we can't compare against the appropriate stage 1.5 file"
+        exit 1
+    fi
+    
+    cmd1="dd if=${1} bs=1 skip=512 count=508"
+    cmd2="dd if=${GRUB_IMG_DIR}/${STAGE_1_5} bs=1 count=508"
+
+elif [[ ${BOOT_DRIVE_BYTE_decimal} -lt 128 ]]; then
+    
+    ERR "The 0x40 'boot drive' byte on ${1} is set to an inappropriate value"
+    ERR "(current: '0x${BOOT_DRIVE_BYTE_hex}'; valid: >=0x80 && <0xff)"
+    Err "If you're reading from the right drive, the MBR is likely [partially] corrupt"
+    BAD "GRUB stage1 (MBR) in unexpected state; suggest running grub-install"
+    exit ${exitCode}
+
+else
+    
+    BIOS_BOOT_DRIVE_NUMBER=$(( BOOT_DRIVE_BYTE_decimal - 128 ))
+    DEBUG "    At boot-time GRUB will read this as BIOS disk #${BIOS_BOOT_DRIVE_NUMBER}"
+    DEBUG "    E.g., sda containing MBR could be seen as BIOS disk #0 but with 0x81,"
+    DEBUG "      stage1 would try to load stage2 from the 2nd disk"
+    INFO "GRUB stage1 is attempting to directly load stage2 on this system by seeking"
+    INFO "to the sector of the stage2 file in BIOS disk #${BIOS_BOOT_DRIVE_NUMBER}"
+    Info "On RHEL systems this means Anaconda installed GRUB itself and no one has"
+    Info "ever run the grub-install command"
+
+    STAGE2_SECTOR_binary=$(dd if=${1} bs=1 skip=$((0x44)) count=4 2>/dev/null | xxd -b | awk '{print $5 $4 $3 $2}')
+    STAGE2_SECTOR_decimal=$((2#$STAGE2_SECTOR_binary))
+    STAGE2_SECTOR_b=$((STAGE2_SECTOR_decimal * 512 ))
+    STAGE2_SECTOR_kib=$(bc <<<"scale=2; ${STAGE2_SECTOR_b}/1024")
+    STAGE2_SECTOR_mib=$(bc <<<"scale=2; ${STAGE2_SECTOR_b}/1024/1024")
+    DEBUG "${1} 0x44-0x47 says STAGE2_SECTOR starts at:"
+    DEBUG "    ${STAGE2_SECTOR_binary} binary sector"
+    DEBUG "    ${STAGE2_SECTOR_decimal} decimal sector"
+    DEBUG "    ${STAGE2_SECTOR_b} bytes (${STAGE2_SECTOR_kib} KiB or ${STAGE2_SECTOR_mib} MiB) into disk"
+
+    cmd1="dd if=${1} skip=${STAGE2_SECTOR_decimal} count=1"
+    cmd2="dd if=${GRUB_IMG_DIR}/stage2 count=1"
+
+fi
+
+DEBUG "Attempting command:"
+DEBUG "    diff <(${cmd1}|xxd)"
+DEBUG "         <(${cmd2}|xxd)"
+
+if diff <(${cmd1} 2>/dev/null | xxd) <(${cmd2} 2>/dev/null | xxd) >/dev/null; then
+    
+    if [[ ${BOOT_DRIVE_BYTE_hex} == ff ]]; then
+        GOOD "GRUB stage1 (MBR) appears to be pointing to an appropriate stage1.5 in sector 1"
+        Good "1st 508b of ${GRUB_IMG_DIR}/${STAGE_1_5} matches 508b starting at sector 1 of ${1}"
+    else
+        GOOD "GRUB stage1 (MBR) appears to be pointing to appropriate stage2 starting sector"
+        Good "1st sector (512b) of ${GRUB_IMG_DIR}/stage2 matches sector ${STAGE2_SECTOR_decimal} of ${1}"
+    fi
+
+else
+    
+    if [[ ${BOOT_DRIVE_BYTE_hex} == ff ]]; then
+        BAD "GRUB stage1 (MBR) possibly pointing to INCORRECT stage1.5"
+        Bad "1st 508b of ${GRUB_IMG_DIR}/${STAGE_1_5} DOES NOT MATCH 508b starting at sector 1 of ${1}"
+    else
+        BAD "GRUB stage1 (MBR) possibly pointing to INCORRECT starting sector for stage2"
+        Bad "1st sector (512b) of ${GRUB_IMG_DIR}/stage2 DOES NOT MATCH sector ${STAGE2_SECTOR_decimal} of ${1}"
+    fi
+    
+    diff <(${cmd1} 2>/dev/null | xxd) <(${cmd2} 2>/dev/null | xxd)
+    printf "\nPress ENTER to lauch the following command for comparison or Ctrl-c to quit\n"
+    read -p "vimdiff <(${cmd1}|xxd) <(${cmd2}|xxd)"
+    vimdiff -Rs <(echo :color desert) <(${cmd1} 2>/dev/null | xxd) <(${cmd2} 2>/dev/null | xxd)
+
+fi
+
+exit ${exitCode}
