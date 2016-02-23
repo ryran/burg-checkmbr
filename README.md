@@ -1,4 +1,5 @@
-# burg-checkmbr - Check health of GRUBv1 stage1, stage1.5, & stage2 
+# burg-checkmbr
+Check health of GRUBv1 stage1, stage1.5, & stage2
 
 ## What can you do or check before a reboot in RHEL5/RHEL6 to make sure that a GRUB MBR installation is intact and the system will come back online?
 
@@ -34,6 +35,33 @@ Extra detail:
 ## Solution?
 
 With `burg-checkmbr` I was aiming to build an intelligent checker-script.
+
+```
+$ ./burg-checkmbr -h
+Usage: burg-checkmbr [-q|--quiet] <DEVICE> [GRUB_IMG_DIR]
+Uses bytes 0x40 & 0x44-0x47 of DEVICE to determine health of GRUBv1 stages 1, 1.5, & 2
+
+Note that GRUB_IMG_DIR defaults to /boot/grub if omitted
+
+PROCESS:
+
+- Read 1 byte starting at 0x40 to determine whether using stage1.5 or not
+
+- If find '0xff', then stage1.5 in use
+
+  * Read 508 bytes starting at sector 1 (i.e., 2nd disk sector; after MBR)
+    Compare to appropriate stage1_5 img by detecting fs-type of GRUB_IMG_DIR
+
+- If not using stage1.5
+
+  * Read 4 bytes starting at 0x44 (STAGE1_STAGE2_SECTOR)
+    Seek to sector specified by STAGE1_STAGE2_SECTOR, read first 512 bytes
+    Compare with first 512 bytes of <GRUB_IMG_DIR>/stage2
+
+Example usage:
+  burg-checkmbr /dev/sda
+  burg-checkmbr /tmp/sda.img /mnt/boot/grub
+```
 
 ![screenshot](http://people.redhat.com/rsawhill/scratch/burg-checkmbr.png)
 
